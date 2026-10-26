@@ -1,134 +1,147 @@
 package webserver
 
 import (
+	"errors"
 	"fmt"
-	"html/template"
+	"net"
 	"net/http"
+	"strings"
 
-	"github.com/go-shiori/shiori/internal/database"
 	"github.com/go-shiori/shiori/internal/model"
-	"github.com/go-shiori/warc"
 	cch "github.com/patrickmn/go-cache"
+	"github.com/sirupsen/logrus"
 )
 
-var developmentMode = false
-
-// Handler is handler for serving the web interface.
-type handler struct {
-	DB           database.DB
-	DataDir      string
-	RootPath     string
-	UserCache    *cch.Cache
-	SessionCache *cch.Cache
+// Handler is Handler for serving the web interface.
+type Handler struct {
+	DB        model.DB
+	DataDir   string
+	RootPath  string
+	UserCache *cch.Cache
+	// SessionCache *cch.Cache
 	ArchiveCache *cch.Cache
+	Log          bool
 
-	templates map[string]*template.Template
+	dependencies model.Dependencies
+	trustedIPs   []*net.IPNet
 }
 
-func (h *handler) prepareSessionCache() {
-	h.SessionCache.OnEvicted(func(key string, val interface{}) {
-		account := val.(model.Account)
-		arr, found := h.UserCache.Get(account.Username)
-		if !found {
-			return
-		}
+func (h *Handler) PrepareSessionCache() {
+	// h.SessionCache.OnEvicted(func(key string, val interface{}) {
+	// 	account := val.(*model.AccountDTO)
+	// 	arr, found := h.UserCache.Get(account.Username)
+	// 	if !found {
+	// 		return
+	// 	}
 
-		sessionIDs := arr.([]string)
-		for i := 0; i < len(sessionIDs); i++ {
-			if sessionIDs[i] == key {
-				sessionIDs = append(sessionIDs[:i], sessionIDs[i+1:]...)
-				break
-			}
-		}
+	// 	sessionIDs := arr.([]string)
+	// 	for i := 0; i < len(sessionIDs); i++ {
+	// 		if sessionIDs[i] == key {
+	// 			sessionIDs = append(sessionIDs[:i], sessionIDs[i+1:]...)
+	// 			break
+	// 		}
+	// 	}
 
-		h.UserCache.Set(account.Username, sessionIDs, -1)
-	})
+	// 	h.UserCache.Set(account.Username, sessionIDs, -1)
+	// })
 }
 
-func (h *handler) prepareArchiveCache() {
-	h.ArchiveCache.OnEvicted(func(key string, data interface{}) {
-		archive := data.(*warc.Archive)
-		archive.Close()
-	})
-}
-
-func (h *handler) prepareTemplates() error {
-	// Prepare variables
+// validateSession checks whether user session is still valid or not
+func (h *Handler) validateSession(r *http.Request) error {
+	var account *model.AccountDTO
 	var err error
-	h.templates = make(map[string]*template.Template)
 
-	// Prepare func map
-	funcMap := template.FuncMap{
-		"html": func(s string) template.HTML {
-			return template.HTML(s)
-		},
+	if h.dependencies.Config().Http.SSOProxyAuth {
+		account, err = h.ssoAccount(r)
+		if err != nil {
+			h.dependencies.Logger().WithError(err).Error("getting sso account")
+		}
 	}
 
-	// Create template for login, index and content
-	for _, name := range []string{"login", "index", "content"} {
-		h.templates[name], err = createTemplate(name+".html", funcMap)
+	if account == nil {
+		account, err = h.tokenAccount(r)
 		if err != nil {
 			return err
 		}
 	}
 
-	// Create template for archive overlay
-	h.templates["archive"], err = template.New("archive").Delims("$$", "$$").Parse(
-		`<div id="shiori-archive-header">
-		<p id="shiori-logo"><span>栞</span>shiori</p>
-		<div class="spacer"></div>
-		<a href="$$.URL$$" target="_blank">View Original</a>
-		$$if .HasContent$$
-		<a href="/bookmark/$$.ID$$/content">View Readable</a>
-		$$end$$
-		</div>`)
-	if err != nil {
-		return err
+	if r.Method != "" && r.Method != "GET" && account.Owner != nil && !*account.Owner {
+		return fmt.Errorf("account level is not sufficient")
 	}
 
+	h.dependencies.Logger().WithFields(logrus.Fields{
+		"username": account.Username,
+		"method":   r.Method,
+		"path":     r.URL.Path,
+	}).Info("allowing legacy api access using JWT token")
+
 	return nil
+
 }
 
-func (h *handler) getSessionID(r *http.Request) string {
-	// Get session-id from header and cookie
-	headerSessionID := r.Header.Get("X-Session-Id")
-	cookieSessionID := func() string {
-		cookie, err := r.Cookie("session-id")
+func (h *Handler) tokenAccount(r *http.Request) (*model.AccountDTO, error) {
+	authorization := r.Header.Get(model.AuthorizationHeader)
+	if authorization == "" {
+		// Get token from cookie
+		tokenCookie, err := r.Cookie("token")
 		if err != nil {
-			return ""
+			return nil, fmt.Errorf("session is not exist")
 		}
 
-		return cookie.Value
-	}()
-
-	// Session ID in cookie is more priority than in header
-	sessionID := headerSessionID
-	if cookieSessionID != "" {
-		sessionID = cookieSessionID
+		authorization = tokenCookie.Value
 	}
 
-	return sessionID
+	if authorization != "" {
+		authParts := strings.SplitN(authorization, " ", 2)
+		if len(authParts) != 2 || authParts[0] != model.AuthorizationTokenType {
+			return nil, fmt.Errorf("session has been expired")
+		}
+
+		account, err := h.dependencies.Domains().Auth().CheckToken(r.Context(), authParts[1])
+		if err != nil {
+			return nil, fmt.Errorf("session has been expired")
+		}
+
+		return account, nil
+	}
+
+	return nil, errors.New("session has been expired")
 }
 
-// validateSession checks whether user session is still valid or not
-func (h *handler) validateSession(r *http.Request) error {
-	sessionID := h.getSessionID(r)
-	if sessionID == "" {
-		return fmt.Errorf("session is not exist")
-	}
-
-	// Make sure session is not expired yet
-	val, found := h.SessionCache.Get(sessionID)
-	if !found {
-		return fmt.Errorf("session has been expired")
-	}
-
-	// If this is not get request, make sure it's owner
-	if r.Method != "" && r.Method != "GET" {
-		if account := val.(model.Account); !account.Owner {
-			return fmt.Errorf("account level is not sufficient")
+func (h *Handler) ssoAccount(r *http.Request) (*model.AccountDTO, error) {
+	remoteAddr := r.RemoteAddr
+	ip, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		var addrErr *net.AddrError
+		if errors.As(err, &addrErr) && addrErr.Err == "missing port in address" {
+			ip = remoteAddr
+		} else {
+			return nil, err
 		}
 	}
+	requestIP := net.ParseIP(ip)
+	if !h.isTrustedIP(requestIP) {
+		return nil, fmt.Errorf("'%s' is not a trusted ip", r.RemoteAddr)
+	}
 
-	return nil
+	headerName := h.dependencies.Config().Http.SSOProxyAuthHeaderName
+	userName := r.Header.Get(headerName)
+	if userName == "" {
+		return nil, nil
+	}
+
+	account, err := h.dependencies.Domains().Accounts().GetAccountByUsername(r.Context(), userName)
+	if err != nil {
+		return nil, err
+	}
+
+	return account, nil
+}
+func (h *Handler) isTrustedIP(ip net.IP) bool {
+	for _, net := range h.trustedIPs {
+		if ok := net.Contains(ip); ok {
+			return true
+		}
+	}
+	return false
 }

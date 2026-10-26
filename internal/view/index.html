@@ -2,67 +2,75 @@
 <html lang="en">
 
 <head>
-	<base href="$$.$$">
+	<base href="$$.RootPath$$">
 	<title>Shiori - Bookmarks Manager</title>
 
 	<meta charset="UTF-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 
-	<link rel="apple-touch-icon-precomposed" sizes="152x152" href="res/apple-touch-icon-152x152.png">
-	<link rel="apple-touch-icon-precomposed" sizes="144x144" href="res/apple-touch-icon-144x144.png">
-	<link rel="icon" type="image/png" href="res/favicon-32x32.png" sizes="32x32">
-	<link rel="icon" type="image/png" href="res/favicon-16x16.png" sizes="16x16">
-	<link rel="icon" type="image/x-icon" href="res/favicon.ico">
+	<link rel="apple-touch-icon-precomposed" sizes="152x152" href="assets/res/apple-touch-icon-152x152.png">
+	<link rel="apple-touch-icon-precomposed" sizes="144x144" href="assets/res/apple-touch-icon-144x144.png">
+	<link rel="icon" type="image/png" href="assets/res/favicon-32x32.png" sizes="32x32">
+	<link rel="icon" type="image/png" href="assets/res/favicon-16x16.png" sizes="16x16">
+	<link rel="icon" type="image/x-icon" href="assets/res/favicon.ico">
+	<link rel="manifest" href="assets/manifest.webmanifest" />
 
-	<link href="css/source-sans-pro.min.css" rel="stylesheet">
-	<link href="css/fontawesome.min.css" rel="stylesheet">
-	<link href="css/stylesheet.css" rel="stylesheet">
-	<link href="css/custom-dialog.css" rel="stylesheet">
-	<link href="css/bookmark-item.css" rel="stylesheet">
+	<link href="assets/css/style.css" rel="stylesheet">
 
-	<script src="js/vue.min.js"></script>
-	<script src="js/url.min.js"></script>
+	<script src="assets/js/vue.min.js" type="text/javascript"></script>
+	<script src="assets/js/url.min.js" type="text/javascript"></script>
+	<script src="assets/js/client/shiori-api.js" type="text/javascript"></script>
 </head>
 
-<body class="night">
-	<div id="main-scene" :class="{night: appOptions.nightMode}">
-		<div id="main-sidebar">
-			<a v-for="item in sidebarItems" :title="item.title" :class="{active: activePage === item.page}" @click="switchPage(item.page)">
-				<i class="fas fa-fw" :class="item.icon"></i>
-			</a>
-			<div class="spacer"></div>
-			<a title="Logout" @click="logout">
-				<i class="fas fa-fw fa-sign-out-alt"></i>
-			</a>
+<body>
+	<div id="app">
+		<login-view v-if="isLoggedIn === false && loginRequired" :version="version" @login-success="onLoginSuccess"></login-view>
+		<div id="main-scene" v-else-if="isLoggedIn === true">
+    		<div id="main-sidebar">
+    			<a v-for="item in sidebarItems" :title="item.title" :class="{active: activePage === item.page}" @click="switchPage(item.page)">
+    				<i class="fas fa-fw" :class="item.icon"></i>
+    			</a>
+    			<div class="spacer"></div>
+    			<a title="Logout" @click="logout">
+    				<i class="fas fa-fw fa-sign-out-alt"></i>
+    			</a>
+    		</div>
+    		<keep-alive>
+    			<component :is="activePage" :active-account="activeAccount" :app-options="appOptions" @setting-changed="saveSetting"></component>
+    		</keep-alive>
+    		<custom-dialog v-bind="dialog"></custom-dialog>
 		</div>
-		<keep-alive>
-			<component :is="activePage" :active-account="activeAccount" :app-options="appOptions" @setting-changed="saveSetting"></component>
-		</keep-alive>
-		<custom-dialog v-bind="dialog" />
 	</div>
 
 	<script type="module">
-		import basePage from "./js/page/base.js";
-		import pageHome from "./js/page/home.js";
-		import pageSetting from "./js/page/setting.js";
-		import customDialog from "./js/component/dialog.js";
+		import basePage from "./assets/js/page/base.js";
+		import LoginComponent from "./assets/js/component/login.js";
+		import pageHome from "./assets/js/page/home.js";
+		import pageSetting from "./assets/js/page/setting.js";
+		import customDialog from "./assets/js/component/dialog.js";
+        import EventBus from "./assets/js/component/eventBus.js";
+        Vue.prototype.$bus = EventBus;
 
 		var app = new Vue({
-			el: '#main-scene',
+			el: '#app',
 			mixins: [basePage],
 			components: {
 				pageHome,
 				pageSetting,
-				customDialog
+				customDialog,
+				'login-view': LoginComponent
 			},
 			data: {
+				isLoggedIn: null,
+				loginRequired: false,
+				version: "$$.Version$$",
 				activePage: "page-home",
 				sidebarItems: [{
 					title: "Home",
 					icon: "fa-home",
 					page: "page-home",
 				}, {
-					title: "Setting",
+					title: "Settings",
 					icon: "fa-cog",
 					page: "page-setting",
 				}],
@@ -73,6 +81,9 @@
 						state = { activePage: page },
 						url = new Url;
 
+                    if (page === 'page-home'  && this.activePage === 'page-home') {
+                        Vue.prototype.$bus.$emit('clearHomePage', {});
+                    }
 					url.hash = pageName;
 					this.activePage = page;
 					history.pushState(state, page, url);
@@ -85,15 +96,20 @@
 						secondText: "No",
 						mainClick: () => {
 							this.dialog.loading = true;
-							fetch(new URL("api/logout", document.baseURI), {
+							fetch(new URL("api/v1/auth/logout", document.baseURI), {
 								method: "post"
 							}).then(response => {
 								if (!response.ok) throw response;
 								return response;
 							}).then(() => {
 								localStorage.removeItem("shiori-account");
+								localStorage.removeItem("shiori-token");
 								document.cookie = `session-id=; Path=${new URL(document.baseURI).pathname}; Expires=Thu, 01 Jan 1970 00:00:00 GMT;`;
-								location.href = new URL("login", document.baseURI);
+								document.cookie = `token=; Path=${new URL(document.baseURI).pathname}; Expires=Thu, 01 Jan 1970 00:00:00 GMT;`;
+								this.isLoggedIn = false;
+								this.loginRequired = true;
+								this.dialog.loading = false;
+								this.dialog.visible = false;
 							}).catch(err => {
 								this.dialog.loading = false;
 								this.getErrorMessage(err).then(msg => {
@@ -104,51 +120,103 @@
 					});
 				},
 				saveSetting(opts) {
-					localStorage.setItem("shiori-setting", JSON.stringify(opts));
 					this.appOptions = opts;
-					document.body.className = opts.nightMode ? "night" : "";
+                    this.themeSwitch(opts.Theme)
 				},
 				loadSetting() {
-					var opts = JSON.parse(localStorage.getItem("shiori-setting")) || {},
-						showId = (typeof opts.showId === "boolean") ? opts.showId : false,
-						listMode = (typeof opts.listMode === "boolean") ? opts.listMode : false,
-						hideThumbnail = (typeof opts.hideThumbnail === "boolean") ? opts.hideThumbnail : false,
-						hideExcerpt = (typeof opts.hideExcerpt === "boolean") ? opts.hideExcerpt : false,
-						nightMode = (typeof opts.nightMode === "boolean") ? opts.nightMode : false,
-						keepMetadata = (typeof opts.keepMetadata === "boolean") ? opts.keepMetadata : false,
-						useArchive = (typeof opts.useArchive === "boolean") ? opts.useArchive : false,
-						makePublic = (typeof opts.makePublic === "boolean") ? opts.makePublic : false;
+					var opts = JSON.parse(localStorage.getItem("shiori-account")) || {},
+						config = opts.Config || {},
+						ShowId = (typeof config.ShowId === "boolean") ? config.ShowId : false,
+						ListMode = (typeof config.ListMode === "boolean") ? config.ListMode : false,
+						HideThumbnail = (typeof config.HideThumbnail === "boolean") ? config.HideThumbnail : false,
+						HideExcerpt = (typeof config.HideExcerpt === "boolean") ? config.HideExcerpt : false,
+                        Theme = (typeof config.Theme === "string" && config.Theme !== "") ? config.Theme : "follow",
+						KeepMetadata = (typeof config.KeepMetadata === "boolean") ? config.KeepMetadata : false,
+						UseArchive = (typeof config.UseArchive === "boolean") ? config.UseArchive : false,
+						CreateEbook = (typeof config.CreateEbook === "boolean") ? config.CreateEbook : false,
+						MakePublic = (typeof config.MakePublic === "boolean") ? config.MakePublic : false;
 
 					this.appOptions = {
-						showId: showId,
-						listMode: listMode,
-						hideThumbnail: hideThumbnail,
-						hideExcerpt: hideExcerpt,
-						nightMode: nightMode,
-						keepMetadata: keepMetadata,
-						useArchive: useArchive,
-						makePublic: makePublic,
+						ShowId: ShowId,
+						ListMode: ListMode,
+						HideThumbnail: HideThumbnail,
+						HideExcerpt: HideExcerpt,
+						Theme: Theme,
+						KeepMetadata: KeepMetadata,
+						UseArchive: UseArchive,
+						CreateEbook: CreateEbook,
+						MakePublic: MakePublic,
 					};
-
-					document.body.className = nightMode ? "night" : "";
+                    this.themeSwitch(Theme)
 				},
 				loadAccount() {
 					var account = JSON.parse(localStorage.getItem("shiori-account")) || {},
-						id = (typeof account.id === "number") ? account.id : 0,
-						username = (typeof account.username === "string") ? account.username : "",
-						owner = (typeof account.owner === "boolean") ? account.owner : false;
+						id = (typeof account.ID === "number") ? account.ID : 0,
+						username = (typeof account.Username === "string") ? account.Username : "",
+						owner = (typeof account.Owner === "boolean") ? account.Owner : false;
 
 					this.activeAccount = {
-						id: id,
-						username: username,
-						owner: owner,
+						ID: id,
+						Username: username,
+						Owner: owner,
 					};
+				},
+
+				onLoginSuccess() {
+					this.loadAccount();
+					this.loadSetting();
+					this.isLoggedIn = true;
+				},
+
+				async validateSession() {
+					const token = localStorage.getItem("shiori-token");
+					const account = localStorage.getItem("shiori-account");
+
+					try {
+						const response = await fetch(new URL("api/v1/auth/me", document.baseURI), {
+							headers: {
+								"Authorization": `Bearer ${token}`
+							}
+						});
+
+						if (!response.ok) {
+							throw new Error('Invalid session');
+						}
+
+						const accountData = await response.json();
+						localStorage.setItem(
+							"shiori-account",
+							JSON.stringify(accountData),
+						);
+						return true;
+					} catch (err) {
+						// Clear invalid session data
+						localStorage.removeItem("shiori-account");
+						localStorage.removeItem("shiori-token");
+						document.cookie = `session-id=; Path=${new URL(document.baseURI).pathname}; Expires=Thu, 01 Jan 1970 00:00:00 GMT;`;
+						document.cookie = `token=; Path=${new URL(document.baseURI).pathname}; Expires=Thu, 01 Jan 1970 00:00:00 GMT;`;
+						return false;
+					}
+				},
+
+				async checkLoginStatus() {
+					const isValid = await this.validateSession();
+					this.isLoggedIn = isValid;
+
+					if (isValid) {
+						this.loadSetting();
+						this.loadAccount();
+					} else {
+						this.loginRequired = true;
+					}
 				}
 			},
-			mounted() {
-				// Load setting
-				this.loadSetting();
-				this.loadAccount();
+			async mounted() {
+				await this.checkLoginStatus();
+				if (this.isLoggedIn) {
+					this.loadSetting();
+					this.loadAccount();
+				}
 
 				// Prepare history state watcher
 				var stateWatcher = (e) => {

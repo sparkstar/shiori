@@ -1,0 +1,113 @@
+package model
+
+import (
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
+
+	"github.com/sirupsen/logrus"
+)
+
+// Account is the database representation for account.
+type Account struct {
+	ID       DBID       `db:"id"`
+	Username string     `db:"username"`
+	Password string     `db:"password" json:",omitempty"`
+	Owner    bool       `db:"owner"`
+	Config   UserConfig `db:"config"`
+}
+
+type UserConfig struct {
+	ShowId        bool   `json:"ShowId"`
+	ListMode      bool   `json:"ListMode"`
+	HideThumbnail bool   `json:"HideThumbnail"`
+	HideExcerpt   bool   `json:"HideExcerpt"`
+	Theme         string `json:"Theme"`
+	KeepMetadata  bool   `json:"KeepMetadata"`
+	UseArchive    bool   `json:"UseArchive"`
+	CreateEbook   bool   `json:"CreateEbook"`
+	MakePublic    bool   `json:"MakePublic"`
+}
+
+func (c *UserConfig) Scan(value interface{}) error {
+	switch v := value.(type) {
+	case []byte:
+		if err := json.Unmarshal(v, c); err != nil {
+			logrus.WithError(err).Error("failed to unmarshal user config, using defaults")
+		}
+		c.Defaults()
+		return nil
+	case string:
+		if err := json.Unmarshal([]byte(v), c); err != nil {
+			logrus.WithError(err).Error("failed to unmarshal user config, using defaults")
+		}
+		c.Defaults()
+		return nil
+	default:
+		return fmt.Errorf("unsupported type: %T", v)
+	}
+}
+
+func (c UserConfig) Value() (driver.Value, error) {
+	return json.Marshal(c)
+}
+
+// Defaults sets default values for UserConfig fields
+func (c *UserConfig) Defaults() {
+	if c.Theme == "" {
+		c.Theme = "system"
+	}
+}
+
+// NewUserConfig returns a UserConfig with default values
+func NewUserConfig() UserConfig {
+	c := UserConfig{}
+	c.Defaults()
+	return c
+}
+
+// ToDTO converts Account to AccountDTO.
+func (a Account) ToDTO() AccountDTO {
+	owner := a.Owner
+	config := a.Config
+
+	return AccountDTO{
+		ID:       a.ID,
+		Username: a.Username,
+		Owner:    &owner,
+		Config:   &config,
+	}
+}
+
+// AccountDTO is data transfer object for Account.
+type AccountDTO struct {
+	ID       DBID
+	Username string
+	Password string `json:",omitempty"`
+	Owner    *bool
+	Config   *UserConfig
+}
+
+func (adto *AccountDTO) IsOwner() bool {
+	return adto.Owner != nil && *adto.Owner
+}
+
+func (adto *AccountDTO) IsValidCreate() error {
+	if adto.Username == "" {
+		return NewValidationError("username", "username should not be empty")
+	}
+
+	if adto.Password == "" {
+		return NewValidationError("password", "password should not be empty")
+	}
+
+	return nil
+}
+
+func (adto *AccountDTO) IsValidUpdate() error {
+	if adto.Username == "" && adto.Password == "" && adto.Owner == nil && adto.Config == nil {
+		return NewValidationError("account", "no fields to update")
+	}
+
+	return nil
+}

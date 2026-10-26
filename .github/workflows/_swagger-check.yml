@@ -1,0 +1,21 @@
+name: "swagger-check"
+
+on: workflow_call
+
+jobs:
+  swagger-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Setup Go
+        uses:  actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install dependencies
+        run: go install $(cat go.mod | grep swaggo/swag | cut -d " " -f 1)/cmd/swag@$(cat go.mod | grep swaggo/swag | cut -d " " -f 2)
+
+      - name: check
+        run: make swag-check
+
